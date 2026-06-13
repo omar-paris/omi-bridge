@@ -1,6 +1,7 @@
 """Dispatch des commandes vocales vers Hermes + réponses Telegram."""
 import asyncio
 import logging
+import re
 
 import httpx
 
@@ -22,10 +23,26 @@ DEMANDE D'ALEX :
 CONTEXTE (ce qui se disait juste avant, même conversation) :
 {context}"""
 
+# Sur reprise de session, les instructions sont déjà dans la conversation hermes
+RESUME_TEMPLATE = """Nouvelle demande vocale d'Alex via OMI (suite de notre conversation) :
+{command}
 
-async def run_hermes(command: str, context: str, trigger: dict, timeout: int) -> str:
-    """Lance `hermes chat -Q` et retourne la réponse finale (stdout)."""
-    prompt = PROMPT_TEMPLATE.format(
+Contexte audio récent :
+{context}"""
+
+
+async def run_hermes(
+    command: str, context: str, trigger: dict, timeout: int,
+    resume_session: str | None = None,
+) -> tuple[str, str | None]:
+    """Lance `hermes chat -Q` et retourne (réponse, session_id hermes).
+
+    Si resume_session est fourni, la conversation hermes précédente est
+    reprise (--resume) : c'est ce qui donne UNE conversation continue à
+    travers plusieurs commandes vocales.
+    """
+    template = RESUME_TEMPLATE if resume_session else PROMPT_TEMPLATE
+    prompt = template.format(
         keyword_label=trigger.get("label", "Allo Omar"),
         command=command or "(rien après le mot-clé — réagis au contexte ci-dessous)",
         context=context or "(pas de contexte disponible)",
@@ -33,6 +50,8 @@ async def run_hermes(command: str, context: str, trigger: dict, timeout: int) ->
     # hermes_extra_args (config) permet de cibler un autre agent/modèle,
     # ex. ["-m", "anthropic/claude-sonnet-4"] — par défaut : profil hermes courant (h-omar)
     args = ["hermes", "chat", "-Q", "-q", prompt] + list(trigger.get("hermes_extra_args", []))
+    if resume_session:
+        args += ["--resume", resume_session]
 
     async with _hermes_semaphore:
         proc = await asyncio.create_subprocess_exec(
@@ -47,7 +66,13 @@ async def run_hermes(command: str, context: str, trigger: dict, timeout: int) ->
             raise RuntimeError(f"hermes chat timeout ({timeout}s)")
     if proc.returncode != 0:
         raise RuntimeError(f"hermes chat exit {proc.returncode}: {stderr.decode()[-300:]}")
-    return stdout.decode().strip()
+
+    # hermes écrit "session_id: <id>" sur stderr en mode -Q
+    session_id = None
+    match = re.search(r"session_id:\s*(\S+)", stderr.decode())
+    if match:
+        session_id = match.group(1)
+    return stdout.decode().strip(), session_id
 
 
 async def send_telegram(chat_id: int, text: str) -> None:

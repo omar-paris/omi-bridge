@@ -24,6 +24,9 @@ context:
   pre_trigger_segments: 25
   # Silence (secondes) qui clôt la commande vocale après le mot-clé
   command_silence_seconds: 6
+  # Fenêtre (heures) pendant laquelle les commandes successives reprennent
+  # la MÊME conversation hermes (--resume) au lieu d'en ouvrir une nouvelle
+  session_resume_hours: 12
 
 limits:
   # Anti-burst OA : jamais plus de N `hermes chat` simultanés

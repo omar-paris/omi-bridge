@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS day_summaries (
     received_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS hermes_sessions (
+    uid TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    hermes_session_id TEXT NOT NULL,
+    last_used TEXT NOT NULL,
+    PRIMARY KEY (uid, agent)
+);
+
 CREATE TABLE IF NOT EXISTS commands (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT,
@@ -144,6 +152,27 @@ def complete_command(cmd_id: int, status: str, response_text: str) -> None:
         conn.execute(
             "UPDATE commands SET status=?, response_text=?, completed_at=? WHERE id=?",
             (status, response_text, now_iso(), cmd_id),
+        )
+
+
+def get_hermes_session(uid: str, agent: str, max_age_hours: float) -> str | None:
+    """Session hermes à reprendre si la dernière commande est assez récente."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT hermes_session_id FROM hermes_sessions "
+            "WHERE uid=? AND agent=? AND last_used > datetime('now', ?)",
+            (uid, agent, f"-{max_age_hours} hours"),
+        ).fetchone()
+    return row["hermes_session_id"] if row else None
+
+
+def save_hermes_session(uid: str, agent: str, session_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO hermes_sessions (uid, agent, hermes_session_id, last_used) "
+            "VALUES (?,?,?,?) ON CONFLICT(uid, agent) DO UPDATE SET "
+            "hermes_session_id=excluded.hermes_session_id, last_used=excluded.last_used",
+            (uid, agent, session_id, now_iso().replace("T", " ")[:19]),
         )
 
 

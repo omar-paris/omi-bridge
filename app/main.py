@@ -152,10 +152,17 @@ async def finalize_after_silence(session_id: str, uid: str, user: dict) -> None:
 
     await dispatch.send_telegram(chat_id, f"OMI · reçu : « {command_text} » — je traite.")
     try:
-        response = await dispatch.run_hermes(
+        # Conversation continue : on reprend la session hermes précédente
+        # du même agent si elle est assez récente
+        agent = trigger.get("agent", "omar")
+        resume = db.get_hermes_session(uid, agent, CONFIG["context"]["session_resume_hours"])
+        response, hermes_sid = await dispatch.run_hermes(
             command_text, context_text, trigger,
             timeout=CONFIG["limits"]["hermes_timeout_seconds"],
+            resume_session=resume,
         )
+        if hermes_sid:
+            db.save_hermes_session(uid, agent, hermes_sid)
         db.complete_command(cmd_id, "done", response)
         await dispatch.send_telegram(chat_id, response or "(réponse vide de l'agent)")
     except Exception as exc:  # noqa: BLE001
