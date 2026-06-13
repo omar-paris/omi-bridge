@@ -1,0 +1,9 @@
+# omi-bridge — webhooks OMI (wearable)
+# ⚠️ Vhost PUBLIC volontairement : le cloud OMI doit pouvoir POSTer ici.
+# Pas de `import tailnet_only`. Auth = token secret dans le chemin d'URL
+# (OMI ne supporte pas les headers custom). Toute requête sans le bon
+# token reçoit 404 de l'app (port 9998, service systemd user omi-bridge).
+omi.omar.paris {
+	import security_headers
+	reverse_proxy 127.0.0.1:9998
+}

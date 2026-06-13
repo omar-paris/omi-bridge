@@ -1,0 +1,31 @@
+# omi-bridge — configuration multi-utilisateur
+# Chaque webhook OMI arrive avec ?uid=<id OMI de l'utilisateur>.
+# uid "*" = wildcard (attrape tout uid non listé — pratique en solo).
+
+users:
+  - uid: "*"
+    name: Alex
+    telegram_chat_id: 123456789  # chat Telegram qui reçoit les réponses
+    triggers:
+      - agent: omar
+        label: "Allo Omar"
+        # Variantes produites par la transcription française (Deepgram) :
+        keywords:
+          - "allo omar"
+          - "allot omar"
+          - "a l eau omar"
+          - "hello omar"
+          - "alau omar"
+        # Args supplémentaires passés à `hermes chat` (optionnel)
+        hermes_extra_args: []
+
+context:
+  # Nb de segments de conversation envoyés comme contexte à l'agent
+  pre_trigger_segments: 25
+  # Silence (secondes) qui clôt la commande vocale après le mot-clé
+  command_silence_seconds: 6
+
+limits:
+  # Anti-burst OA : jamais plus de N `hermes chat` simultanés
+  max_concurrent_hermes: 2
+  hermes_timeout_seconds: 240

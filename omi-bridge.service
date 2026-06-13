@@ -1,0 +1,13 @@
+[Unit]
+Description=omi-bridge — webhook OMI vers agents Hermes OA
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/omar/32-Infra/integrations/omi-bridge
+Environment=PATH=/home/omar/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/omar/32-Infra/integrations/omi-bridge/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 9998
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
