@@ -40,6 +40,32 @@ CREATE TABLE IF NOT EXISTS day_summaries (
     received_at TEXT NOT NULL
 );
 
+-- Sujets extraits : une ligne par conversation/épisode capté
+CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid TEXT NOT NULL,
+    memory_omi_id TEXT,
+    day TEXT,                 -- YYYY-MM-DD (jour local de début)
+    start_time TEXT,          -- ISO
+    end_time TEXT,            -- ISO
+    duration_min INTEGER,
+    content_type TEXT,        -- conversation|reunion|solo|media|ambiance|autre
+    side TEXT,                -- business|perso|unknown
+    persons TEXT,             -- JSON list
+    subject TEXT,
+    todo TEXT,                -- JSON list
+    omi_title TEXT,
+    omi_category TEXT,
+    -- annotations manuelles (film, spectacle, note perso...)
+    user_label TEXT,
+    user_note TEXT,
+    user_rating TEXT,
+    annotated INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(memory_omi_id)
+);
+CREATE INDEX IF NOT EXISTS idx_topics_day ON topics(uid, day);
+
 CREATE TABLE IF NOT EXISTS hermes_sessions (
     uid TEXT NOT NULL,
     agent TEXT NOT NULL,
@@ -173,6 +199,59 @@ def save_hermes_session(uid: str, agent: str, session_id: str) -> None:
             "VALUES (?,?,?,?) ON CONFLICT(uid, agent) DO UPDATE SET "
             "hermes_session_id=excluded.hermes_session_id, last_used=excluded.last_used",
             (uid, agent, session_id, now_iso().replace("T", " ")[:19]),
+        )
+
+
+def all_memories() -> list[sqlite3.Row]:
+    with connect() as conn:
+        return list(conn.execute("SELECT id, uid, omi_id, raw FROM memories ORDER BY id"))
+
+
+def upsert_topic(t: dict) -> None:
+    """Insère/actualise un sujet extrait (clé = memory_omi_id).
+    Ne touche pas aux colonnes d'annotation manuelle si déjà annoté."""
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO topics
+            (uid, memory_omi_id, day, start_time, end_time, duration_min,
+             content_type, side, persons, subject, todo, omi_title, omi_category, created_at)
+            VALUES (:uid,:memory_omi_id,:day,:start_time,:end_time,:duration_min,
+             :content_type,:side,:persons,:subject,:todo,:omi_title,:omi_category,:created_at)
+            ON CONFLICT(memory_omi_id) DO UPDATE SET
+              day=excluded.day, start_time=excluded.start_time, end_time=excluded.end_time,
+              duration_min=excluded.duration_min, content_type=excluded.content_type,
+              side=excluded.side, persons=excluded.persons, subject=excluded.subject,
+              todo=excluded.todo, omi_title=excluded.omi_title, omi_category=excluded.omi_category""",
+            t,
+        )
+
+
+def topics_for_day(uid: str, day: str) -> list[sqlite3.Row]:
+    with connect() as conn:
+        return list(conn.execute(
+            "SELECT * FROM topics WHERE uid=? AND day=? ORDER BY start_time",
+            (uid, day),
+        ))
+
+
+def recent_annotatable_topic(uid: str, types: tuple[str, ...] = ("media", "ambiance", "autre")) -> sqlite3.Row | None:
+    """Dernier sujet média non encore annoté (pour « annote le film d'hier »)."""
+    placeholders = ",".join("?" * len(types))
+    with connect() as conn:
+        return conn.execute(
+            f"SELECT * FROM topics WHERE uid=? AND content_type IN ({placeholders}) "
+            f"AND annotated=0 ORDER BY start_time DESC LIMIT 1",
+            (uid, *types),
+        ).fetchone()
+
+
+def annotate_topic(topic_id: int, label: str | None, note: str | None, rating: str | None) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE topics SET user_label=COALESCE(?,user_label), "
+            "user_note=COALESCE(?,user_note), user_rating=COALESCE(?,user_rating), "
+            "annotated=1 WHERE id=?",
+            (label, note, rating, topic_id),
         )
 
 

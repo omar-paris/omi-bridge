@@ -62,12 +62,25 @@ perso sur un autre VPS, etc.).
 Toute la conversation vit dans UNE session hermes (reprise `--resume`), la
 même que les commandes ponctuelles dans la fenêtre `session_resume_hours`.
 
-## Sécurité voix
+## Modèle de sécurité (3 couches)
 
-`security.require_user_voice: true` → seuls les segments reconnus comme la
-voix du propriétaire (profil vocal OMI entraîné, `is_user=1`) déclenchent les
-mots-clés ou alimentent une conversation. À activer après vérification que
-les segments réels arrivent bien avec `is_user=1`.
+L'OMI capte de l'audio ambiant : n'importe quelle voix (TV, enfant, invité)
+peut prononcer un mot-clé. Le système ne doit JAMAIS agir tout seul.
+
+1. **Verrou dur — lecture seule par défaut.** Toute commande ponctuelle et
+   tout tour d'écoute en conversation tournent avec `hermes chat -t ''`
+   (ZÉRO outil) : l'agent peut répondre/proposer mais ne peut PHYSIQUEMENT
+   rien modifier (pas de fichier, carte, post, build, commande système).
+   Ce verrou ne dépend pas de l'obéissance du modèle au prompt.
+2. **Exécution explicite seulement.** Les outils complets ne sont activés que
+   sur le chemin « <agent> c'est parti » (lancement d'un plan en mode
+   conversation). C'est le SEUL moyen de déclencher une action réelle.
+3. **Filtre voix (quand le profil OMI reconnaît le propriétaire).**
+   `security.require_user_voice: true` → seuls les segments `is_user=1`
+   (voix entraînée dans l'app) déclenchent ou alimentent. À activer une fois
+   vérifié que les segments réels d'Alex arrivent avec `is_user=1` (sinon
+   tout est bloqué). Tant que c'est `false`, la couche 1 reste la protection
+   principale.
 
 ## Détails de fonctionnement
 

@@ -9,11 +9,12 @@ permet pas de headers custom sur ses webhooks).
 """
 import asyncio
 import logging
+import re
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
-from . import db, dispatch
+from . import db, dispatch, extractor
 from .config import CONFIG, WEBHOOK_SECRET, resolve_user
 from .detector import build_patterns, find_trigger, normalize
 
@@ -177,6 +178,11 @@ async def finalize_after_silence(session_id: str, uid: str, user: dict) -> None:
         await enter_conversation(uid, user, trigger, cmd_id, " ".join(words[1:]), context_text)
         return
 
+    # Annotation manuelle : « Allo Omar annote/note le film … »
+    if words and words[0] in ("annote", "annoter") or words[:2] == ["note", "le"]:
+        await annotate_recent(uid, user, command_text, cmd_id)
+        return
+
     if not command_text:
         await dispatch.send_telegram(chat_id, "OMI : j'ai entendu le mot-clé mais aucune demande derrière. Reformule ?")
         db.complete_command(cmd_id, "empty", "")
@@ -201,6 +207,40 @@ async def finalize_after_silence(session_id: str, uid: str, user: dict) -> None:
         log.exception("Échec dispatch cmd #%d", cmd_id)
         db.complete_command(cmd_id, "error", str(exc))
         await dispatch.send_telegram(chat_id, f"OMI : échec du traitement ({exc}). Réessaie ou vérifie omi-bridge.")
+
+
+# ----- Annotation manuelle d'un sujet média ------------------------------
+
+async def annotate_recent(uid: str, user: dict, command_text: str, cmd_id: int) -> None:
+    """« Allo Omar annote le film d'hier c'était Inception, 8 sur 10 »
+    → attache label/note/rating au dernier sujet média non annoté."""
+    chat_id = user["telegram_chat_id"]
+    topic = db.recent_annotatable_topic(uid)
+    if topic is None:
+        await dispatch.send_telegram(chat_id, "OMI : aucun épisode média récent à annoter.")
+        db.complete_command(cmd_id, "done", "no topic")
+        return
+
+    # Note chiffrée : « 8 sur 10 », « 8/10 », « note de 8 »
+    rating = None
+    m = re.search(r"(\d{1,2})\s*(?:sur|/)\s*(\d{1,2})", command_text)
+    if m:
+        rating = f"{m.group(1)}/{m.group(2)}"
+    else:
+        m = re.search(r"note\s+(?:de\s+)?(\d{1,2})", normalize(command_text))
+        if m:
+            rating = f"{m.group(1)}/10"
+
+    # Le reste de la phrase = label + commentaire (on retire le verbe d'amorce)
+    body = re.sub(r"^\s*(annote[rz]?|note le|note la)\s+", "", command_text, flags=re.I).strip()
+    db.annotate_topic(topic["id"], label=body or None, note=body or None, rating=rating)
+    when = topic["day"]
+    await dispatch.send_telegram(
+        chat_id,
+        f"OMI · noté pour le média du {when} (~{topic['duration_min']} min) :\n"
+        f"« {body} »" + (f"\n⭐ {rating}" if rating else ""),
+    )
+    db.complete_command(cmd_id, "done", f"annotated topic {topic['id']}")
 
 
 # ----- Mode conversation -------------------------------------------------
@@ -263,8 +303,9 @@ async def conversation_tick(uid: str, user: dict) -> None:
         norm = normalize(utterance)
 
         if any(normalize(kw) in norm for kw in CONFIG["conversation"]["launch_keywords"]):
+            # SEUL chemin qui active les outils : exécution explicite « c'est parti »
             await exit_conversation(uid, user, dispatch.CONV_LAUNCH_TEMPLATE.format(command=utterance),
-                                    ack="OMI · GO reçu — exécution du plan.")
+                                    ack="OMI · GO reçu — exécution du plan.", allow_actions=True)
             return
         if any(normalize(kw) in norm for kw in CONFIG["conversation"]["end_keywords"]):
             await exit_conversation(uid, user, dispatch.CONV_END_TEMPLATE,
@@ -274,7 +315,7 @@ async def conversation_tick(uid: str, user: dict) -> None:
         await conversation_hermes_reply(uid, user, dispatch.CONV_TURN_TEMPLATE.format(command=utterance))
 
 
-async def conversation_hermes_reply(uid: str, user: dict, prompt: str) -> None:
+async def conversation_hermes_reply(uid: str, user: dict, prompt: str, allow_actions: bool = False) -> None:
     conv = conversations.get(uid)
     if conv is None:
         return
@@ -283,7 +324,8 @@ async def conversation_hermes_reply(uid: str, user: dict, prompt: str) -> None:
     try:
         resume = db.get_hermes_session(uid, agent, CONFIG["context"]["session_resume_hours"])
         response, sid = await dispatch.run_hermes_raw(
-            prompt, trigger, CONFIG["limits"]["hermes_timeout_seconds"], resume_session=resume,
+            prompt, trigger, CONFIG["limits"]["hermes_timeout_seconds"],
+            resume_session=resume, allow_actions=allow_actions,
         )
         if sid:
             db.save_hermes_session(uid, agent, sid)
@@ -293,7 +335,8 @@ async def conversation_hermes_reply(uid: str, user: dict, prompt: str) -> None:
         await dispatch.send_telegram(chat_id, f"OMI : raté sur ce tour ({exc}) — continue, je suis toujours là.")
 
 
-async def exit_conversation(uid: str, user: dict, final_prompt: str, ack: str) -> None:
+async def exit_conversation(uid: str, user: dict, final_prompt: str, ack: str,
+                            allow_actions: bool = False) -> None:
     conv = conversations.pop(uid, None)
     if conv is None:
         return
@@ -305,7 +348,7 @@ async def exit_conversation(uid: str, user: dict, final_prompt: str, ack: str) -
     # hermes est la même : on envoie le prompt final dessus
     conversations[uid] = conv  # réinsertion temporaire pour conversation_hermes_reply
     try:
-        await conversation_hermes_reply(uid, user, final_prompt)
+        await conversation_hermes_reply(uid, user, final_prompt, allow_actions=allow_actions)
     finally:
         conversations.pop(uid, None)
 
@@ -327,6 +370,12 @@ async def webhook_memory(secret: str, request: Request, uid: str = Query(default
     if isinstance(payload, dict):
         db.insert_memory(uid, payload)
         log.info("Memory reçue: %s", (payload.get("structured") or {}).get("title"))
+        try:
+            import json as _json
+            topic = extractor.extract_one(_json.dumps(payload), uid)
+            log.info("Sujet extrait: [%s/%s] %s", topic["content_type"], topic["side"], topic["subject"])
+        except Exception:  # noqa: BLE001
+            log.exception("Échec extraction sujet")
     return {"status": "ok"}
 
 
