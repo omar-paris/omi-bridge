@@ -38,6 +38,15 @@ def load_config() -> dict:
     cfg["context"].setdefault("pre_trigger_segments", 25)
     cfg["context"].setdefault("command_silence_seconds", 6)
     cfg["context"].setdefault("session_resume_hours", 12)
+    cfg.setdefault("conversation", {})
+    cfg["conversation"].setdefault("pause_seconds", 10)
+    cfg["conversation"].setdefault("idle_timeout_minutes", 15)
+    cfg["conversation"].setdefault("launch_keywords", ["c est parti"])
+    cfg["conversation"].setdefault(
+        "end_keywords", ["fin de conversation", "termine la conversation", "stop la conversation"]
+    )
+    cfg.setdefault("security", {})
+    cfg["security"].setdefault("require_user_voice", False)
     cfg.setdefault("limits", {})
     cfg["limits"].setdefault("max_concurrent_hermes", 2)
     cfg["limits"].setdefault("hermes_timeout_seconds", 240)

@@ -30,6 +30,30 @@ RESUME_TEMPLATE = """Nouvelle demande vocale d'Alex via OMI (suite de notre conv
 Contexte audio récent :
 {context}"""
 
+CONV_OPEN_TEMPLATE = """Alex ouvre un MODE CONVERSATION via son wearable OMI (mot-clé "{keyword_label} conversation").
+Fonctionnement : il parle librement ; à chaque pause tu reçois ce qu'il vient de dire et tu réponds en écoute active.
+Tes réponses partent sur Telegram : courtes (2 à 6 phrases), en français, sans markdown lourd.
+Rôle : prendre note, reformuler brièvement ce que tu retiens, poser au plus UNE question utile,
+et quand c'est pertinent proposer : continuer à écouter / explorer un point / préparer un plan d'action.
+IMPORTANT : n'exécute AUCUNE action lourde (build, modification, création) tant qu'Alex n'a pas dit "c'est parti".
+Accumule plutôt un plan d'action au fil de l'eau.
+
+Premières paroles d'Alex :
+{command}
+
+Contexte audio juste avant :
+{context}"""
+
+CONV_TURN_TEMPLATE = """(mode conversation, suite) Alex vient de dire :
+{command}"""
+
+CONV_LAUNCH_TEMPLATE = """Alex vient de dire « {command} » : GO.
+Exécute maintenant le plan d'action accumulé dans cette conversation, avec tes outils,
+puis envoie un rapport concis de ce qui a été fait."""
+
+CONV_END_TEMPLATE = """Alex clôt la conversation sans lancer d'exécution.
+Envoie un récapitulatif structuré et bref : points notés, décisions, liste "à faire" pour plus tard."""
+
 
 async def run_hermes(
     command: str, context: str, trigger: dict, timeout: int,
@@ -47,6 +71,13 @@ async def run_hermes(
         command=command or "(rien après le mot-clé — réagis au contexte ci-dessous)",
         context=context or "(pas de contexte disponible)",
     )
+    return await run_hermes_raw(prompt, trigger, timeout, resume_session)
+
+
+async def run_hermes_raw(
+    prompt: str, trigger: dict, timeout: int, resume_session: str | None = None,
+) -> tuple[str, str | None]:
+    """Variante bas niveau : prompt déjà construit (mode conversation)."""
     # hermes_extra_args (config) permet de cibler un autre agent/modèle,
     # ex. ["-m", "anthropic/claude-sonnet-4"] — par défaut : profil hermes courant (h-omar)
     args = ["hermes", "chat", "-Q", "-q", prompt] + list(trigger.get("hermes_extra_args", []))

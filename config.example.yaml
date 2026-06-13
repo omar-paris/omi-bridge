@@ -28,6 +28,23 @@ context:
   # la MÊME conversation hermes (--resume) au lieu d'en ouvrir une nouvelle
   session_resume_hours: 12
 
+conversation:
+  # « Allo <agent> conversation » ouvre le mode ; chaque pause de N secondes
+  # déclenche une réponse conversationnelle (écoute active, même session hermes)
+  pause_seconds: 10
+  # Sortie automatique (avec récap) après N minutes sans paroles
+  idle_timeout_minutes: 15
+  # « Omar c'est parti » / « Aurel c'est parti » → exécution du plan accumulé
+  launch_keywords: ["c est parti"]
+  end_keywords: ["fin de conversation", "termine la conversation", "stop la conversation"]
+
+security:
+  # true = seuls les segments reconnus comme la voix du propriétaire (is_user,
+  # profil vocal OMI entraîné dans l'app) peuvent déclencher ou alimenter.
+  # Activer UNIQUEMENT après avoir vérifié que les segments réels arrivent
+  # avec is_user=1, sinon tout est bloqué.
+  require_user_voice: false
+
 limits:
   # Anti-burst OA : jamais plus de N `hermes chat` simultanés
   max_concurrent_hermes: 2

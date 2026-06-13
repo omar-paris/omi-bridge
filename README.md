@@ -47,6 +47,28 @@ dans `config.yaml` (`"*"` = wildcard). Chaque user a son chat Telegram et ses
 propres triggers (« Allo Omar » → agent business, « Allo Aurel » → agent
 perso sur un autre VPS, etc.).
 
+## Mode conversation
+
+« *Allo Omar conversation* » ouvre une session d'écoute active :
+
+- chaque pause de `conversation.pause_seconds` (défaut 10 s) envoie ce qui
+  vient d'être dit à l'agent, qui répond en mode écoute (notes, reformulation,
+  au plus une question, propositions continuer/explorer/lancer) ;
+- l'agent n'exécute **aucune action lourde** tant que l'utilisateur n'a pas
+  dit « **c'est parti** » → exécution du plan accumulé ;
+- « **fin de conversation** » → clôture avec récapitulatif structuré ;
+- `conversation.idle_timeout_minutes` (défaut 15) de silence → clôture auto.
+
+Toute la conversation vit dans UNE session hermes (reprise `--resume`), la
+même que les commandes ponctuelles dans la fenêtre `session_resume_hours`.
+
+## Sécurité voix
+
+`security.require_user_voice: true` → seuls les segments reconnus comme la
+voix du propriétaire (profil vocal OMI entraîné, `is_user=1`) déclenchent les
+mots-clés ou alimentent une conversation. À activer après vérification que
+les segments réels arrivent bien avec `is_user=1`.
+
 ## Détails de fonctionnement
 
 - **Détection** : normalisation (minuscules, sans accents/ponctuation) puis
