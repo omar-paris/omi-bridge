@@ -202,7 +202,8 @@ async def finalize_after_silence(session_id: str, uid: str, user: dict) -> None:
         if hermes_sid:
             db.save_hermes_session(uid, agent, hermes_sid)
         db.complete_command(cmd_id, "done", response)
-        await dispatch.send_telegram(chat_id, response or "(réponse vide de l'agent)")
+        fallback = "OMI : je n'ai pas réussi à formuler de réponse, peux-tu reformuler ?"
+        await dispatch.send_telegram(chat_id, response or fallback)
     except Exception as exc:  # noqa: BLE001
         log.exception("Échec dispatch cmd #%d", cmd_id)
         db.complete_command(cmd_id, "error", str(exc))

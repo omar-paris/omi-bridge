@@ -13,16 +13,15 @@ log = logging.getLogger("omi-bridge.dispatch")
 _hermes_semaphore = asyncio.Semaphore(CONFIG["limits"]["max_concurrent_hermes"])
 
 PROMPT_TEMPLATE = """Tu reçois une demande vocale d'Alex, captée par son wearable OMI (commande "{keyword_label}").
-Ta réponse sera envoyée telle quelle sur Telegram à Alex : réponds en français, de façon concise et directe (pas de markdown lourd, pas de préambule).
+Ta réponse part telle quelle sur Telegram : réponds TOUJOURS par du texte en français, concis et direct (pas de markdown lourd, pas de préambule).
 
-⚠️ MODE CONSULTATIF — RÈGLE ABSOLUE :
-Tu peux LIRE et te RENSEIGNER (consulter l'état, chercher, répondre à une question, faire un calcul).
-Tu NE DOIS JAMAIS exécuter d'action qui modifie quoi que ce soit : pas de création/modification/suppression
-de fichier, carte kanban, post, déploiement, build, envoi de message à un tiers, commande système.
-Une commande vocale ambiante peut être mal transcrite ou ne pas venir d'Alex : dans le doute, tu ne fais RIEN.
-Si la demande implique une action de modification, NE L'EXÉCUTE PAS : décris en une phrase le plan que tu
-proposes, et précise qu'Alex doit confirmer par « {keyword_label} c'est parti » (mode conversation) pour lancer.
-La transcription vocale peut contenir des erreurs : interprète avec bon sens, mais reste en lecture seule.
+⚠️ MODE CONSULTATIF — tu n'as VOLONTAIREMENT AUCUN outil dans ce mode.
+N'essaie pas d'agir ni d'appeler un outil : tu ne peux que RÉPONDRE EN TEXTE.
+- Question / info / calcul → réponds directement, au mieux de ta connaissance.
+- Demande d'action (créer/modifier/supprimer, carte, post, build, déploiement, message à un tiers) →
+  NE L'EXÉCUTE PAS. Réponds en une ou deux phrases : le plan que tu proposes + « dis "{keyword_label} c'est parti" pour que je le lance ».
+Une commande vocale peut être mal transcrite ou ne pas venir d'Alex : dans le doute, propose, n'agis pas.
+Donne toujours une réponse textuelle utile, même brève — ne renvoie jamais une réponse vide.
 
 DEMANDE D'ALEX :
 {command}
@@ -101,7 +100,10 @@ async def run_hermes_raw(
         # outil (vérifié : `-t ''` est ignoré et retombe sur la config par
         # défaut, alors que `-t none` ne charge rien). Verrou lecture seule.
         args += ["-t", "none"]
-    if resume_session:
+    # IMPORTANT : on ne reprend une session QUE en mode consultatif. Une session
+    # hermes ne doit JAMAIS changer de mode outils (sinon elle boucle/timeout).
+    # L'exécution (« c'est parti ») part toujours sur une session fraîche.
+    if resume_session and not allow_actions:
         args += ["--resume", resume_session]
 
     async with _hermes_semaphore:
