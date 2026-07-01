@@ -14,11 +14,11 @@ from .config import CONFIG, resolve_user
 MEANINGFUL = ("conversation", "reunion", "solo")
 
 SYNTH_PROMPT = """Voici les conversations captées aujourd'hui ({day}) par le wearable OMI d'Alex.
-Produis, en français et SANS markdown lourd :
-1. Un récap synthétique en 3-5 phrases de la journée d'Alex (sujets marquants, décisions).
-2. Une liste "À FAIRE" consolidée et dédupliquée (puces courtes, actionnables). Si rien, écris "À faire : (rien noté)".
-3. Pour chaque élément à faire, préfixe [BIZ] si professionnel, [PERSO] sinon.
-Sois concis et utile, pas de remplissage.
+Produis, en français, sans markdown, sans préambule, DIRECTEMENT le contenu :
+- 2-3 phrases max sur la journée (sujets marquants, décisions).
+- Puis une liste "À FAIRE" dédupliquée, puces courtes. Chaque ligne : [BIZ] ou [PERSO] + action.
+- Si aucun à-faire : "À faire : rien noté".
+Pas de titre, pas de remplissage, commence directement.
 
 CONVERSATIONS :
 {items}"""
@@ -83,11 +83,15 @@ async def generate(uid: str, day: str | None = None) -> str:
         except Exception as exc:  # noqa: BLE001
             synth = f"(synthèse indisponible : {exc})"
 
-    report = (
-        f"📋 Compte rendu du {day}\n\n"
-        f"━ Journal brut ━\n{raw}\n\n"
-        f"━ Synthèse & à-faire ━\n{synth}"
-    )
+    # En-tête : 📋 CR Lundi 21/06/26
+    try:
+        date_obj = dt.date.fromisoformat(day)
+        DAY_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+        day_label = f"{DAY_FR[date_obj.weekday()]} {date_obj.strftime('%d/%m/%y')}"
+    except ValueError:
+        day_label = day
+
+    report = f"📋 CR {day_label}\n\n{raw}\n\n{synth}"
     return report
 
 

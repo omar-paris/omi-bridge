@@ -26,6 +26,8 @@ _load_env(ENV_PATH)
 
 WEBHOOK_SECRET = os.environ.get("OMI_BRIDGE_SECRET", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+HERMES_WEBHOOK_URL = os.environ.get("HERMES_WEBHOOK_URL", "")
+HERMES_WEBHOOK_SECRET = os.environ.get("HERMES_WEBHOOK_SECRET", "")
 
 if not WEBHOOK_SECRET:
     raise RuntimeError("OMI_BRIDGE_SECRET manquant (.env)")
@@ -54,6 +56,9 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
+
+# URL publique (pour enregistrement webhook Telegram)
+TELEGRAM_WEBHOOK_BASE = CONFIG.get("telegram", {}).get("public_url", "")
 
 
 def resolve_user(uid: str) -> dict | None:

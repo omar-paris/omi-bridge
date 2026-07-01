@@ -17,11 +17,13 @@ from fastapi.responses import JSONResponse
 from . import db, dispatch, extractor
 from .config import CONFIG, WEBHOOK_SECRET, resolve_user
 from .detector import build_patterns, find_trigger, normalize
+from .ui import router as ui_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("omi-bridge")
 
 app = FastAPI(title="omi-bridge", docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(ui_router, prefix="/{secret}/ui")
 
 # Commandes vocales en cours d'accumulation : session_id -> état
 # Après détection du mot-clé, on accumule les segments suivants jusqu'à
@@ -120,13 +122,17 @@ async def process_segments(session_id: str, uid: str, user: dict, segments: list
 
     # 2. Sinon, détection de mot-clé sur les nouveaux segments
     patterns = build_patterns(user.get("triggers", []))
-    history = db.recent_segments(session_id, limit=3)
-    previous_text = history[-len(segments) - 1]["text"] if len(history) > len(segments) else ""
+    history = db.recent_segments(session_id, limit=6)
+    # Fenêtre glissante : on concatène les 3 segments précédents pour attraper
+    # les keywords tronqués par Deepgram sur plusieurs webhooks consécutifs.
+    pre_batch = history[:-len(segments)] if len(history) > len(segments) else []
+    previous_text = " ".join(s["text"] for s in pre_batch[-3:])
 
     for i, seg in enumerate(segments):
         if not voice_ok(seg):
             continue
-        prev = segments[i - 1]["text"] if i > 0 else previous_text
+        prev_parts = [s["text"] for s in pre_batch[-2:]] + [segments[j]["text"] for j in range(i)]
+        prev = " ".join(prev_parts[-3:])
         hit = find_trigger(patterns, seg["text"], prev)
         if hit is None:
             continue
@@ -135,6 +141,7 @@ async def process_segments(session_id: str, uid: str, user: dict, segments: list
         log.info("Trigger '%s' détecté (session %s, cmd #%d)", trigger.get("agent"), session_id, cmd_id)
         remaining = [s["text"] for s in segments[i + 1:]]
         pending[session_id] = {
+            "uid": uid,
             "cmd_id": cmd_id,
             "trigger": trigger,
             "parts": ([after] if after else []) + remaining,
@@ -188,22 +195,14 @@ async def finalize_after_silence(session_id: str, uid: str, user: dict) -> None:
         db.complete_command(cmd_id, "empty", "")
         return
 
-    await dispatch.send_telegram(chat_id, f"OMI · reçu : « {command_text} » — je traite.")
     try:
-        # Conversation continue : on reprend la session hermes précédente
-        # du même agent si elle est assez récente
-        agent = trigger.get("agent", "omar")
-        resume = db.get_hermes_session(uid, agent, CONFIG["context"]["session_resume_hours"])
-        response, hermes_sid = await dispatch.run_hermes(
+        # Routage vers H-Omar via webhook — H-Omar répond directement sur Telegram
+        # avec son contexte complet (Kanban, mémoire, outils).
+        await dispatch.run_hermes(
             command_text, context_text, trigger,
             timeout=CONFIG["limits"]["hermes_timeout_seconds"],
-            resume_session=resume,
         )
-        if hermes_sid:
-            db.save_hermes_session(uid, agent, hermes_sid)
-        db.complete_command(cmd_id, "done", response)
-        fallback = "OMI : je n'ai pas réussi à formuler de réponse, peux-tu reformuler ?"
-        await dispatch.send_telegram(chat_id, response or fallback)
+        db.complete_command(cmd_id, "done", "webhook→h-omar")
     except Exception as exc:  # noqa: BLE001
         log.exception("Échec dispatch cmd #%d", cmd_id)
         db.complete_command(cmd_id, "error", str(exc))
@@ -323,14 +322,10 @@ async def conversation_hermes_reply(uid: str, user: dict, prompt: str, allow_act
     trigger, agent = conv["trigger"], conv["agent"]
     chat_id = user["telegram_chat_id"]
     try:
-        resume = db.get_hermes_session(uid, agent, CONFIG["context"]["session_resume_hours"])
-        response, sid = await dispatch.run_hermes_raw(
+        await dispatch.run_hermes_raw(
             prompt, trigger, CONFIG["limits"]["hermes_timeout_seconds"],
-            resume_session=resume, allow_actions=allow_actions,
+            allow_actions=allow_actions,
         )
-        if sid:
-            db.save_hermes_session(uid, agent, sid)
-        await dispatch.send_telegram(chat_id, response or "(réponse vide)")
     except Exception as exc:  # noqa: BLE001
         log.exception("Échec tour de conversation (uid %s)", uid)
         await dispatch.send_telegram(chat_id, f"OMI : raté sur ce tour ({exc}) — continue, je suis toujours là.")

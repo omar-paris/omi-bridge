@@ -1,40 +1,39 @@
-"""Dispatch des commandes vocales vers Hermes + réponses Telegram."""
+"""Dispatch des commandes vocales vers H-Omar via webhook Hermes + réponses Telegram."""
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
-import re
 
 import httpx
 
-from .config import CONFIG, TELEGRAM_BOT_TOKEN
+from .config import CONFIG, HERMES_WEBHOOK_URL, HERMES_WEBHOOK_SECRET
 
 log = logging.getLogger("omi-bridge.dispatch")
 
-# Anti-burst : limite le nombre de `hermes chat` simultanés (règle OA : max 5)
+# Garde-fou anti-burst (même si le webhook est async côté Hermes)
 _hermes_semaphore = asyncio.Semaphore(CONFIG["limits"]["max_concurrent_hermes"])
 
 PROMPT_TEMPLATE = """Tu reçois une demande vocale d'Alex, captée par son wearable OMI (commande "{keyword_label}").
 Ta réponse part telle quelle sur Telegram : réponds TOUJOURS par du texte en français, concis et direct (pas de markdown lourd, pas de préambule).
 
-⚠️ MODE CONSULTATIF — tu n'as VOLONTAIREMENT AUCUN outil dans ce mode.
-N'essaie pas d'agir ni d'appeler un outil : tu ne peux que RÉPONDRE EN TEXTE.
-- Question / info / calcul → réponds directement, au mieux de ta connaissance.
-- Demande d'action (créer/modifier/supprimer, carte, post, build, déploiement, message à un tiers) →
-  NE L'EXÉCUTE PAS. Réponds en une ou deux phrases : le plan que tu proposes + « dis "{keyword_label} c'est parti" pour que je le lance ».
-Une commande vocale peut être mal transcrite ou ne pas venir d'Alex : dans le doute, propose, n'agis pas.
-Donne toujours une réponse textuelle utile, même brève — ne renvoie jamais une réponse vide.
-
 DEMANDE D'ALEX :
 {command}
 
-CONTEXTE (ce qui se disait juste avant, même conversation) :
-{context}"""
+CONTEXTE AUDIO (ce qui se disait juste avant) :
+{context}
 
-# Sur reprise de session, les instructions sont déjà dans la conversation hermes
+DONNÉES LIVE — KANBAN (pré-fetché par omi-bridge, accès direct DB — utilise ces chiffres sans faire de fetch web) :
+{kanban_snapshot}"""
+
 RESUME_TEMPLATE = """Nouvelle demande vocale d'Alex via OMI (suite de notre conversation) :
 {command}
 
 Contexte audio récent :
-{context}"""
+{context}
+
+DONNÉES LIVE — KANBAN :
+{kanban_snapshot}"""
 
 CONV_OPEN_TEMPLATE = """Alex ouvre un MODE CONVERSATION via son wearable OMI (mot-clé "{keyword_label} conversation").
 Fonctionnement : il parle librement ; à chaque pause tu reçois ce qu'il vient de dire et tu réponds en écoute active.
@@ -61,89 +60,110 @@ CONV_END_TEMPLATE = """Alex clôt la conversation sans lancer d'exécution.
 Envoie un récapitulatif structuré et bref : points notés, décisions, liste "à faire" pour plus tard."""
 
 
+async def get_kanban_snapshot() -> str:
+    """Fetch live Kanban state via CLI to inject into prompt — no web/Tailnet fetch needed."""
+    async def _run(*args: str) -> str:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=6)
+            return out.decode().strip()
+        except Exception:
+            return ""
+
+    stats, ready, blocked = await asyncio.gather(
+        _run("hermes", "kanban", "stats"),
+        _run("hermes", "kanban", "list", "--status", "ready"),
+        _run("hermes", "kanban", "list", "--status", "blocked"),
+    )
+    parts = []
+    if stats:
+        parts.append(stats)
+    if ready:
+        parts.append(f"Ready:\n{ready}")
+    if blocked:
+        # Limite à 8 lignes pour ne pas surcharger le prompt
+        blocked_lines = blocked.splitlines()[:8]
+        parts.append(f"Bloquées (top 8):\n" + "\n".join(blocked_lines))
+    return "\n\n".join(parts) if parts else "(kanban indisponible)"
+
+
+def _sign(secret: str, body: str) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+
+
+async def post_to_webhook(prompt: str) -> None:
+    """Envoie le prompt formaté à H-Omar via le webhook Hermes.
+
+    H-Omar reçoit le message avec son contexte complet (Kanban, mémoire, outils)
+    et répond directement sur Telegram. Pas de valeur de retour : la réponse
+    arrive en asynchrone depuis H-Omar.
+    """
+    if not HERMES_WEBHOOK_URL or not HERMES_WEBHOOK_SECRET:
+        raise RuntimeError("HERMES_WEBHOOK_URL / HERMES_WEBHOOK_SECRET manquants (.env)")
+
+    body = json.dumps({"prompt": prompt})
+    sig = _sign(HERMES_WEBHOOK_SECRET, body)
+
+    async with _hermes_semaphore:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                HERMES_WEBHOOK_URL,
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Hub-Signature-256": sig,
+                },
+            )
+            resp.raise_for_status()
+    log.info("webhook OMI → H-Omar : %s", resp.status_code)
+
+
 async def run_hermes(
     command: str, context: str, trigger: dict, timeout: int,
     resume_session: str | None = None,
-) -> tuple[str, str | None]:
-    """Lance `hermes chat -Q` et retourne (réponse, session_id hermes).
+) -> None:
+    """Route la commande vocale vers H-Omar via webhook.
 
-    Si resume_session est fourni, la conversation hermes précédente est
-    reprise (--resume) : c'est ce qui donne UNE conversation continue à
-    travers plusieurs commandes vocales.
+    H-Omar répond directement sur Telegram avec son contexte complet.
+    La session est gérée par H-Omar lui-même — pas de session_id retourné.
     """
     template = RESUME_TEMPLATE if resume_session else PROMPT_TEMPLATE
+    kanban_snapshot = await get_kanban_snapshot()
     prompt = template.format(
         keyword_label=trigger.get("label", "Allo Omar"),
         command=command or "(rien après le mot-clé — réagis au contexte ci-dessous)",
         context=context or "(pas de contexte disponible)",
+        kanban_snapshot=kanban_snapshot,
     )
-    # Commande ponctuelle = toujours consultatif (zéro outil)
-    return await run_hermes_raw(prompt, trigger, timeout, resume_session, allow_actions=False)
+    await post_to_webhook(prompt)
 
 
 async def run_hermes_raw(
     prompt: str, trigger: dict, timeout: int, resume_session: str | None = None,
     allow_actions: bool = False,
-) -> tuple[str, str | None]:
-    """Variante bas niveau : prompt déjà construit (mode conversation).
+) -> None:
+    """Variante bas niveau pour le mode conversation : prompt déjà construit.
 
-    allow_actions=False (défaut) → VERROU DUR : hermes tourne sans aucun outil
-    (`-t ''`), il peut répondre mais ne peut PHYSIQUEMENT rien modifier.
-    allow_actions=True → outils complets, réservé à l'exécution explicite
-    (« c'est parti ») validée par la voix d'Alex.
+    allow_actions est conservé pour compatibilité mais H-Omar a ses propres outils —
+    le verrou n'est plus nécessaire, H-Omar décide lui-même ce qu'il exécute.
     """
-    # hermes_extra_args (config) permet de cibler un autre agent/modèle,
-    # ex. ["-m", "anthropic/claude-sonnet-4"] — par défaut : profil hermes courant (h-omar)
-    args = ["hermes", "chat", "-Q", "-q", prompt] + list(trigger.get("hermes_extra_args", []))
-    if not allow_actions:
-        # Sentinelle : un nom de toolset inexistant => hermes ne charge AUCUN
-        # outil (vérifié : `-t ''` est ignoré et retombe sur la config par
-        # défaut, alors que `-t none` ne charge rien). Verrou lecture seule.
-        args += ["-t", "none"]
-    # IMPORTANT : on ne reprend une session QUE en mode consultatif. Une session
-    # hermes ne doit JAMAIS changer de mode outils (sinon elle boucle/timeout).
-    # L'exécution (« c'est parti ») part toujours sur une session fraîche.
-    if resume_session and not allow_actions:
-        args += ["--resume", resume_session]
-
-    async with _hermes_semaphore:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            raise RuntimeError(f"hermes chat timeout ({timeout}s)")
-    if proc.returncode != 0:
-        raise RuntimeError(f"hermes chat exit {proc.returncode}: {stderr.decode()[-300:]}")
-
-    # hermes écrit "session_id: <id>" sur stderr en mode -Q
-    session_id = None
-    match = re.search(r"session_id:\s*(\S+)", stderr.decode())
-    if match:
-        session_id = match.group(1)
-
-    # Filtre le warning du verrou lecture seule (`-t none`) qui sort sur stdout
-    out = "\n".join(
-        ln for ln in stdout.decode().splitlines()
-        if not ln.strip().startswith("Warning: Unknown toolsets")
-    ).strip()
-    return out, session_id
+    await post_to_webhook(prompt)
 
 
-async def send_telegram(chat_id: int, text: str) -> None:
-    """Envoie un message Telegram (découpé si > 4096 chars)."""
-    if not TELEGRAM_BOT_TOKEN:
-        log.error("TELEGRAM_BOT_TOKEN absent — message non envoyé")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+async def send_telegram(chat_id: int, text: str, inline_keyboard: list | None = None) -> None:
+    """Envoie un message via H-Omar (hermes send) — notifications système, erreurs, ACK."""
     chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)] or ["(réponse vide)"]
-    async with httpx.AsyncClient(timeout=30) as client:
-        for chunk in chunks:
-            resp = await client.post(url, data={"chat_id": chat_id, "text": chunk})
-            body = resp.json()
-            if not body.get("ok"):
-                log.error("Échec envoi Telegram: %s", body)
+    for chunk in chunks:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "hermes", "send", "--to", f"telegram:{chat_id}", "-q", chunk,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=15)
+        except Exception as exc:
+            log.error("hermes send échec: %s", exc)
